@@ -1,5 +1,7 @@
-from typing import Literal, Tuple, TypeAlias, Union
+from typing import Literal, Tuple, TypeAlias, Union, List
 
+import jax
+from jax import ShapeDtypeStruct
 from flax import nnx
 
 SingleIntOrDubleIntTuple: TypeAlias = Union[int, Tuple[int, int]]
@@ -56,3 +58,34 @@ def get_activation(activation: str):
 
 def round_up(x: int, div: int = 1) -> int:
     return x + (-x % div)
+
+
+def get_anchors_and_scalers(
+    detection_head_output_shape: List[ShapeDtypeStruct], input_size: Tuple[int, int]
+) -> Tuple[jax.Array, jax.Array]:
+    def get_box_strides(
+        detection_head_output_shape: List[ShapeDtypeStruct], input_height: int
+    ) -> List[int]:
+        strides = []
+        for output_shape in detection_head_output_shape:
+            strides.append(input_height // output_shape.shape[1])
+        return strides
+
+    img_w, img_h = input_size
+    strides = get_box_strides(detection_head_output_shape, img_h)
+    anchors_list = []
+    scalers_list = []
+    for stride in strides:
+        anchor_num = img_w // stride * img_h // stride
+        scalers_list.append(jax.numpy.full((anchor_num,), stride))
+        shift = stride // 2
+        h = jax.numpy.arange(0, img_h, stride) + shift
+        w = jax.numpy.arange(0, img_w, stride) + shift
+        anchor_h, anchor_w = jax.numpy.meshgrid(h, w, indexing="ij")
+        anchor = jax.numpy.stack(
+            [jax.numpy.ravel(anchor_w), jax.numpy.ravel(anchor_h)], axis=1
+        )
+        anchors_list.append(anchor)
+    anchors = jax.lax.concatenate(anchors_list, dimension=0)
+    scalers = jax.lax.concatenate(scalers_list, dimension=0)
+    return anchors, scalers
