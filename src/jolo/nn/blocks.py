@@ -1,4 +1,4 @@
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import jax
 from flax import nnx
@@ -220,7 +220,7 @@ class RepNCSP(nnx.Module):
 
         x2 = self.conv_block_2(x)
 
-        x = jax.lax.concatenate([x1, x2], dimension=-1)
+        x = jax.lax.concatenate([x1, x2], dimension=3)
         x = self.conv_block_3(x)
 
         return x
@@ -306,7 +306,7 @@ class RepNCSPELAN(nnx.Module):
         x4 = self.rep_ncsp_2(x3)
         x4 = self.conv_block_3(x3)
 
-        x = jax.lax.concatenate([x1, x2, x3, x4], dimension=-1)
+        x = jax.lax.concatenate([x1, x2, x3, x4], dimension=3)
         x = self.conv_block_4(x)
         return x
 
@@ -369,7 +369,7 @@ class ELAN(nnx.Module):
 
         x4 = self.conv_block_3(x3)
 
-        x = jax.lax.concatenate([x1, x2, x3, x4], dimension=-1)
+        x = jax.lax.concatenate([x1, x2, x3, x4], dimension=3)
         x = self.conv_block_4(x)
         return x
 
@@ -393,7 +393,9 @@ class PoolBlock(nnx.Module):
         self.pool_fn = nnx.max_pool if self.max_pool else nnx.avg_pool
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        x = self.pool_fn(x, self.window_shape, self.strides, self.padding)  # type: ignore
+        x = self.pool_fn(
+            x, self.window_shape, self.strides, [self.padding, self.padding]
+        )  # type: ignore
         return x
 
 
@@ -439,7 +441,7 @@ class SPPELAN(nnx.Module):
         for pooler in self.poolers:
             features.append(pooler(features[-1]))
 
-        x = jax.lax.concatenate(features, dimension=-1)
+        x = jax.lax.concatenate(features, dimension=3)
         x = self.conv_block_2(x)
         return x
 
@@ -473,24 +475,31 @@ class ADown(nnx.Module):
             rngs=rngs,
         )
 
+        self.in_features = in_features
+        self.out_features = out_features
+        self.dtype = dtype
+
     def __call__(self, x: jax.Array) -> jax.Array:
         x = self.pool_block_1(x)
         x1, x2 = jax.numpy.split(x, 2, axis=-1)
         x1 = self.conv_block_1(x1)
         x2 = self.pool_block_2(x2)
         x2 = self.conv_block_2(x2)
-        return jax.lax.concatenate([x1, x2], dimension=-1)
+        return jax.lax.concatenate([x1, x2], dimension=3)
 
 
 class UpSample(nnx.Module):
     def __init__(
         self,
         *,
+        in_features: int,
         scale_factor: utils.DoubleIntTuple,
         method: str = "nearest",
     ):
         self.scale_factor = scale_factor
         self.method = method
+        self.in_features = in_features
+        self.out_features = in_features
 
     def __call__(self, x: jax.Array) -> jax.Array:
         b, h, w, c = x.shape
@@ -502,9 +511,12 @@ class UpSample(nnx.Module):
         return x
 
 
+# TODO: Accept in_features_list and set out_features
 class Concatenate(nnx.Module):
-    def __init__(self, axis=-1):
+    def __init__(self, in_features_list: Sequence[int], axis=3):
         self.axis = axis
+        self.in_features_list = in_features_list
+        self.out_features = sum(in_features_list)
 
     def __call__(self, x: Sequence[jax.Array]) -> jax.Array:
         return jax.lax.concatenate(x, dimension=self.axis)
@@ -595,7 +607,6 @@ class Detection(nnx.Module):
             inter_features=class_inter_features,
             out_features=num_classes,
             bias_init=bias_init,
-            activation="sigmoid",
             dtype=dtype,
             rngs=rngs,
         )
@@ -616,11 +627,11 @@ class Detection(nnx.Module):
 
     def anc2vec(self, x: jax.Array) -> Tuple[jax.Array, jax.Array]:
         b, h, w, c = x.shape
-        x_reshaped = jax.lax.reshape(x, (b, 4, c // 4))
-        vector_x = nnx.softmax(x_reshaped, -1) * jax.numpy.arange(
+        x_reshaped = jax.lax.reshape(x, (b * h * w, 4, c // 4))
+        vector_x = nnx.softmax(x_reshaped, -1) @ jax.numpy.arange(
             0, self.reg_max, dtype=self.dtype
         )
-        vector_x = jax.numpy.sum(vector_x, axis=-1)
+        # vector_x = jax.numpy.sum(vector_x, axis=-1)
         vector_x = jax.lax.reshape(vector_x, (b, h, w, 4))
         return x, vector_x
 
@@ -631,19 +642,29 @@ class MultiHeadDetection(nnx.Module):
         *,
         in_features_list: Sequence[int],
         num_classes: int,
+        bias_init: int | Sequence[int] = -10,
         reg_max: int | Sequence[int] = 16,
         use_group: bool = True,
         dtype: flax_typing.Dtype,
         rngs: nnx.Rngs,
     ):
         if not isinstance(reg_max, Sequence):
-            self.reg_max = [reg_max] * len(in_features_list)
+            reg_max = [reg_max] * len(in_features_list)
+
+        if not isinstance(bias_init, Sequence):
+            bias_init = [bias_init] * len(in_features_list)
+
+        self.reg_max = reg_max
+        self.bias_init = bias_init
+
+        assert len(self.reg_max) == len(in_features_list)
+        assert len(self.bias_init) == len(in_features_list)
 
         min_in_feature = min(in_features_list)
         anchor_feature_group_count = 4 if use_group else 1
 
         self.detection_heads: Sequence[Detection] = []
-        for i, r in enumerate(self.reg_max):
+        for i, (r, b) in enumerate(zip(self.reg_max, self.bias_init)):
             anchor_inter_features = max(
                 utils.round_up(min_in_feature // 4, anchor_feature_group_count),
                 4 * r,
@@ -656,7 +677,7 @@ class MultiHeadDetection(nnx.Module):
                     num_classes=num_classes,
                     anchor_inter_features=anchor_inter_features,
                     class_inter_features=class_inter_features,
-                    bias_init=-10,
+                    bias_init=b,
                     reg_max=r,
                     anchor_feature_group_count=anchor_feature_group_count,
                     dtype=dtype,
@@ -666,16 +687,14 @@ class MultiHeadDetection(nnx.Module):
 
     def __call__(
         self, x: Sequence[jax.Array]
-    ) -> Tuple[jax.Array, jax.Array, jax.Array]:
-        classes_list = []
-        anchors_list = []
-        vectors_list = []
+    ) -> Tuple[List[jax.Array], List[jax.Array], List[jax.Array]]:
+        classes_list: List[jax.Array] = []
+        anchors_list: List[jax.Array] = []
+        vectors_list: List[jax.Array] = []
         for i, detection_head in enumerate(self.detection_heads):
             class_x, anchor_x, vector_x = detection_head(x[i])
             classes_list.append(class_x)
             anchors_list.append(anchor_x)
             vectors_list.append(vector_x)
-        classes = jax.lax.concatenate(classes_list, dimension=1)
-        anchors = jax.lax.concatenate(anchors_list, dimension=1)
-        vectors = jax.lax.concatenate(vectors_list, dimension=1)
-        return classes, anchors, vectors
+
+        return classes_list, anchors_list, vectors_list
