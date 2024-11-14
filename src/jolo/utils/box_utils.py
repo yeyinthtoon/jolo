@@ -1,17 +1,8 @@
 import math
-from dataclasses import dataclass
 from typing import List, Literal, Tuple, Union
-from flax import typing as flax_typing
 
 import jax
-
-
-@dataclass(frozen=True)
-class AlignerConf:
-    iou: Literal["iou", "diou", "ciou", "siou"]
-    iou_factor: float = 6
-    cls_factor: float = 0.5
-    topk: int = 10
+from flax import typing as flax_typing
 
 
 def calculate_iou_jax(
@@ -40,8 +31,6 @@ def calculate_iou_jax(
     if pairwise:
         # Expand dimensions if necessary for broadcasting
         if len(bbox1.shape) == 2 and len(bbox2.shape) == 2:
-            # bbox1 = ops.expand_dims(bbox1, axis=1)  # (A, 4) -> (A, 1, 4)
-            # bbox2 = ops.expand_dims(bbox2, axis=0)  # (B, 4) -> (1, B, 4)
             bbox1 = bbox1[:, None, :]
             bbox2 = bbox2[None, :, :]
         elif len(bbox1.shape) == 3 and len(bbox2.shape) == 3:
@@ -269,6 +258,8 @@ def get_aligned_targets_detection_jax(
     target_anchor_mask = get_valid_matrix_jax(anchors, target_bbox).astype(dtype)
     gt_mask = jax.numpy.sum(target_bbox, axis=-1) > 0
     gt_mask = gt_mask[:, :, None].astype(dtype)
+    # print("gt_mask: ",gt_mask.shape)
+    # print("target_anchor_mask: ", target_anchor_mask.shape)
     target_matrix, iou_matrix = get_metrics_jax(
         target_cls=target_cls,
         target_bbox=target_bbox,
@@ -366,3 +357,9 @@ def generate_bbox_mask_jax(bboxes, mask_h, mask_w, image_h, image_w, dtype):
     )
     mask = mask.astype(dtype)
     return mask
+
+
+def vec2box(vecs, anchors_norm):
+    lt, rb = jax.numpy.split(vecs, 2, axis=-1)
+    preds_box = jax.numpy.concatenate([anchors_norm - lt, anchors_norm + rb], axis=-1)
+    return preds_box
