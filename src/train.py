@@ -148,7 +148,7 @@ def main(
                 model, optimizer, scalers, anchors, anchors_norm, (x, y)
             )
             step_losses.append(step_loss / batch_size)
-        print(f"{epoch+1} - loss: {np.mean(step_loss)}")
+        print(f"{epoch+1} - loss: {np.mean(step_losses)}")
         model.eval()
 
         val_pclasses = []
