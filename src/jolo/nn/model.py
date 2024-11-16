@@ -12,7 +12,7 @@ class Yolo(nnx.Module):
         self,
         *,
         num_classes: int,
-        head_bias_init: Sequence[int],
+        head_bias_init: Sequence[float],
         dtype: flax_typing.Dtype,
         rngs: nnx.Rngs,
     ):
