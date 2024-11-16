@@ -26,5 +26,6 @@ lint = [
     "ruff>=0.7.2",
 ]
 lint-extra = [
+    "pre-commit>=4.0.1",
     "pylint>=3.3.1",
 ]
