@@ -10,6 +10,7 @@ import tensorflow as tf
 import typer
 from flax import nnx
 from jax import numpy as jnp
+from jax.experimental import mesh_utils
 from keras_cv import layers
 from keras_cv.src import bounding_box
 from keras_cv.src.metrics.coco import compute_pycoco_metrics
@@ -112,6 +113,7 @@ def main(
     nms_iou: float = 0.6,
     nms_max_detections: int = 100,
     epochs: int = 100,
+    tpu: bool = False,
 ):
     train_tfrecs = list(map(str, train_data_dir.glob("*.tfrecord")))
     train_dataset = get_dataset(train_tfrecs, batch_size, training=True)
@@ -139,6 +141,20 @@ def main(
         gradient_accumulation_step=gradient_accumulation_step,
         epochs=epochs,
     )
+    if tpu:
+        num_devices = jax.local_device_count()
+        mesh = jax.sharding.Mesh(
+            mesh_utils.create_device_mesh((num_devices,)), ("data",)
+        )
+        model_sharding = jax.NamedSharding(mesh, jax.sharding.PartitionSpec())
+        data_sharding = jax.NamedSharding(mesh, jax.sharding.PartitionSpec("data"))
+        state = nnx.state((model, optimizer))
+        state = jax.device_put(state, model_sharding)
+        anchors, anchors_norm, scalers = jax.device_put(
+            (anchors, anchors_norm, scalers), model_sharding
+        )
+        nnx.update((model, optimizer), state)
+
     for epoch in range(epochs):
         step_losses = []
         model.train()
@@ -147,6 +163,8 @@ def main(
             x = jnp.asarray(x_tf.numpy())
             for k, v in y_tf.items():
                 y[k] = jnp.asarray(v.numpy())
+            if tpu:
+                x, y = jax.device_put((x, y), data_sharding)
             step_loss = train_step(
                 model, optimizer, scalers, anchors, anchors_norm, (x, y)
             )
@@ -163,6 +181,8 @@ def main(
             val_x = jnp.asarray(val_xtf.numpy())
             for k, v in val_ytf.items():
                 val_y[k] = jnp.asarray(v.numpy())
+            if tpu:
+                val_x, val_y = jax.device_put((val_x, val_y), data_sharding)
             val_class, _, val_vector = model(val_x)
             val_vector_concatenated = jax.numpy.concatenate(
                 [
