@@ -642,7 +642,7 @@ class MultiHeadDetection(nnx.Module):
         *,
         in_features_list: Sequence[int],
         num_classes: int,
-        bias_init: int | Sequence[int] = -10,
+        bias_init: float | Sequence[float] = -10,
         reg_max: int | Sequence[int] = 16,
         use_group: bool = True,
         dtype: flax_typing.Dtype,
