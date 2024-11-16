@@ -64,7 +64,9 @@ def yolo_loss(
     cls_norm = jax.numpy.maximum(jax.numpy.sum(align_cls), 1.0)
     box_norm = jax.numpy.sum(align_cls, axis=-1) * valid_mask
 
-    class_loss = 0.5 * jax.numpy.sum((sigmoid_loss_fn(align_cls, classes_concat) / cls_norm))
+    class_loss = 0.5 * jax.numpy.sum(
+        (sigmoid_loss_fn(align_cls, classes_concat) / cls_norm)
+    )
     # TODO: use where on sum
     """
         jax.numpy.sum(
@@ -91,7 +93,10 @@ def yolo_loss(
         / cls_norm
     )
     dfl_loss = 1.5 * jax.numpy.sum(
-        (dfl_loss_fn(align_bbox, anchors_concat, valid_mask, anchors_norm, 16) * box_norm)
+        (
+            dfl_loss_fn(align_bbox, anchors_concat, valid_mask, anchors_norm, 16)
+            * box_norm
+        )
         / cls_norm
     )
 
