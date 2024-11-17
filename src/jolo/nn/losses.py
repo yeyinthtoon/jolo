@@ -46,18 +46,16 @@ def yolo_loss(
         axis=1,
     )
     boxes = vec2box(vector_concat, anchors_norm)
-    align_cls, align_bbox, valid_mask, aligned_indices = (
-        get_aligned_targets_detection_jax(
-            target_cls=y["classes"],
-            target_bbox=y["bboxes"],
-            predict_cls=classes_concat,
-            predict_bbox=boxes * scalers[..., None],
-            number_of_classes=4,
-            anchors=anchors,
-            iou="ciou",
-            dtype="float32",
-            from_logits=True,
-        )
+    align_cls, align_bbox, valid_mask, _ = get_aligned_targets_detection_jax(
+        target_cls=y["classes"],
+        target_bbox=y["bboxes"],
+        predict_cls=classes_concat,
+        predict_bbox=boxes * scalers[..., None],
+        number_of_classes=4,
+        anchors=anchors,
+        iou="ciou",
+        dtype="float32",
+        from_logits=True,
     )
 
     align_bbox = align_bbox / scalers[..., None]
@@ -101,7 +99,15 @@ def yolo_loss(
     )
 
     loss = class_loss + box_loss + dfl_loss
-    return loss * x.shape[0]
+    return loss * x.shape[0], {
+        "predictions": {"classes": classes_concat, "boxes": boxes * scalers[..., None]},
+        "losses": {
+            "loss": loss,
+            "box_loss": box_loss,
+            "class_loss": class_loss,
+            "dfl_loss": dfl_loss,
+        },
+    }
 
 
 def box_loss_fn(y_true, y_pred, valid_mask, dtype):

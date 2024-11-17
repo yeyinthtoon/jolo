@@ -86,16 +86,17 @@ def evaluate_coco_metrics(
 def train_step(
     model: Yolo,
     optimizer: nnx.Optimizer,
+    metrics: nnx.MultiMetric,
     scalers: jax.Array,
     anchors: jax.Array,
     anchors_norm: jax.Array,
     batch,
 ):
-    loss, grads = nnx.value_and_grad(yolo_loss)(
+    (_, outputs), grads = nnx.value_and_grad(yolo_loss, has_aux=True)(
         model, batch, anchors_norm, anchors, scalers
     )
+    metrics.update(**outputs["losses"])
     optimizer.update(grads)
-    return loss
 
 
 def main(
@@ -115,6 +116,7 @@ def main(
     epochs: int = 100,
     tpu: bool = False,
 ):
+
     train_tfrecs = list(map(str, train_data_dir.glob("*.tfrecord")))
     train_dataset = get_dataset(train_tfrecs, batch_size, training=True)
 
@@ -126,6 +128,12 @@ def main(
         head_bias_init=head_bias_init,
         dtype=dtype,
         rngs=nnx.Rngs(random_seed),
+    )
+    metrics = nnx.MultiMetric(
+        loss=nnx.metrics.Average("loss"),
+        box_loss=nnx.metrics.Average("box_loss"),
+        class_loss=nnx.metrics.Average("class_loss"),
+        dfl_loss=nnx.metrics.Average("dfl_loss"),
     )
     data = np.random.randn(0, input_image_size, input_image_size, 3).astype("float32")
     model.eval()
@@ -148,15 +156,14 @@ def main(
         )
         model_sharding = jax.NamedSharding(mesh, jax.sharding.PartitionSpec())
         data_sharding = jax.NamedSharding(mesh, jax.sharding.PartitionSpec("data"))
-        state = nnx.state((model, optimizer))
+        state = nnx.state((model, optimizer, metrics))
         state = jax.device_put(state, model_sharding)
+        nnx.update((model, optimizer, metrics), state)
         anchors, anchors_norm, scalers = jax.device_put(
             (anchors, anchors_norm, scalers), model_sharding
         )
-        nnx.update((model, optimizer), state)
 
     for epoch in range(epochs):
-        step_losses = []
         model.train()
         for x_tf, y_tf in train_dataset:
             y = {}
@@ -165,11 +172,15 @@ def main(
                 y[k] = jnp.asarray(v.numpy())
             if tpu:
                 x, y = jax.device_put((x, y), data_sharding)
-            step_loss = train_step(
-                model, optimizer, scalers, anchors, anchors_norm, (x, y)
+            train_step(
+                model, optimizer, metrics, scalers, anchors, anchors_norm, (x, y)
             )
-            step_losses.append(step_loss / batch_size)
-        print(f"{epoch+1} - loss: {np.mean(step_losses)}")
+
+        print(f"[train] epoch: {epoch+1},", end=" ")
+        for metric, value in metrics.compute().items():
+            print(f"{metric} : {value}", end=" ")
+        print()
+        metrics.reset()
         model.eval()
 
         val_pclasses = []
