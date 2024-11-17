@@ -1,16 +1,17 @@
-import jax
-import optax
 from typing import Tuple
 
+import jax
+import optax
+
+from jolo.nn.model import Yolo
 from jolo.utils.box_utils import (
     calculate_iou_jax,
-    vec2box,
     get_aligned_targets_detection_jax,
+    vec2box,
 )
-from jolo.nn.model import Yolo
 
 
-def yolo_loss(
+def forward_with_loss(
     model: Yolo,
     batch: Tuple[jax.Array, jax.Array],
     anchors_norm: jax.Array,

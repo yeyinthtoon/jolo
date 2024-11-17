@@ -17,10 +17,9 @@ from keras_cv.src.metrics.coco import compute_pycoco_metrics
 
 from jolo.data.dataset import get_dataset
 from jolo.nn import utils
-from jolo.nn.losses import yolo_loss
+from jolo.nn.losses import forward_with_loss
 from jolo.nn.model import Yolo
 from jolo.nn.optimizer import build_optimizer
-from jolo.utils.box_utils import vec2box
 
 
 def decode_prediction(classes, boxes, nms_conf, nms_iou, nms_max_detections):
@@ -92,11 +91,25 @@ def train_step(
     anchors_norm: jax.Array,
     batch,
 ):
-    (_, outputs), grads = nnx.value_and_grad(yolo_loss, has_aux=True)(
+    (_, outputs), grads = nnx.value_and_grad(forward_with_loss, has_aux=True)(
         model, batch, anchors_norm, anchors, scalers
     )
     metrics.update(**outputs["losses"])
     optimizer.update(grads)
+
+
+@nnx.jit
+def validation_step(
+    model: Yolo,
+    metrics: nnx.MultiMetric,
+    scalers: jax.Array,
+    anchors: jax.Array,
+    anchors_norm: jax.Array,
+    batch,
+):
+    _, outputs = forward_with_loss(model, batch, anchors_norm, anchors, scalers)
+    metrics.update(**outputs["losses"])
+    return outputs["predictions"]
 
 
 def main(
@@ -194,32 +207,19 @@ def main(
                 val_y[k] = jnp.asarray(v.numpy())
             if tpu:
                 val_x, val_y = jax.device_put((val_x, val_y), data_sharding)
-            val_class, _, val_vector = model(val_x)
-            val_vector_concatenated = jax.numpy.concatenate(
-                [
-                    jax.numpy.reshape(
-                        v, (v.shape[0], v.shape[1] * v.shape[2], v.shape[3])
-                    )
-                    for v in val_vector
-                ],
-                axis=1,
+            val_predictions = validation_step(
+                model, metrics, scalers, anchors, anchors_norm, (val_x, val_y)
             )
-            val_class_concatenated = jax.numpy.concatenate(
-                [
-                    jax.numpy.reshape(
-                        cls, (cls.shape[0], cls.shape[1] * cls.shape[2], cls.shape[3])
-                    )
-                    for cls in val_class
-                ],
-                axis=1,
-            )
-            val_pbox = (
-                vec2box(val_vector_concatenated, anchors_norm) * scalers[..., None]
-            )
-            val_pclasses.append(val_class_concatenated)
-            val_pboxes.append(val_pbox)
+            val_pclasses.append(val_predictions["classes"])
+            val_pboxes.append(val_predictions["boxes"])
             val_yclasses.append(val_y["classes"])
             val_yboxes.append(val_y["bboxes"])
+
+        print(f"[validation] epoch: {epoch+1},", end=" ")
+        for metric, value in metrics.compute().items():
+            print(f"{metric} : {value}", end=" ")
+        print()
+        metrics.reset()
 
         _ = evaluate_coco_metrics(
             val_yclasses,
