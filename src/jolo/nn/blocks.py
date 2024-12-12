@@ -2,6 +2,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import jax
 from flax import nnx
+from flax.nnx import initializers
 from flax import typing as flax_typing
 
 from jolo.nn import utils
@@ -34,6 +35,7 @@ class ConvBlock(nnx.Module):
             use_bias=use_bias,
             padding=padding,
             feature_group_count=feature_group_count,
+            kernel_init=initializers.kaiming_uniform(),
             dtype=dtype,
             rngs=rngs,
         )
@@ -113,7 +115,6 @@ class BottleNeck(nnx.Module):
         ),
         residual: bool = True,
         expand: float = 1.0,
-        activation: Optional[utils.Activation] = "silu",
         dtype: flax_typing.Dtype,
         rngs: nnx.Rngs,
     ):
@@ -139,7 +140,6 @@ class BottleNeck(nnx.Module):
         self.kernel_size = kernel_size
         self.residual = residual
         self.expand = expand
-        self.activation = activation
         self.dtype = dtype
 
     def __call__(self, x: jax.Array) -> jax.Array:
@@ -554,7 +554,8 @@ class ConvSequence(nnx.Module):
             in_features=inter_features,
             out_features=out_features,
             kernel_size=(1, 1),
-            bias_init=nnx.initializers.constant(bias_init),
+            bias_init=initializers.constant(bias_init),
+            kernel_init=initializers.kaiming_uniform(),
             feature_group_count=feature_group_count,
             dtype=dtype,
             rngs=rngs,
