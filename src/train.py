@@ -1,6 +1,7 @@
 import os
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+from functools import partial
 from pathlib import Path
 from typing import List
 
@@ -10,7 +11,7 @@ import tensorflow as tf
 import typer
 from flax import nnx
 from jax import numpy as jnp
-from jax.experimental import mesh_utils
+from jax.experimental import jax2tf, mesh_utils
 from keras_cv import layers
 from keras_cv.src import bounding_box
 from keras_cv.src.metrics.coco import compute_pycoco_metrics
@@ -81,6 +82,46 @@ def evaluate_coco_metrics(
     return metrics
 
 
+def evaluate_coco_metrics_no_nms(
+    classes, boxes, pred_classes, pred_boxes, pred_confidence, pred_num_detections
+):
+    classes = jax.numpy.concat(classes, axis=0).squeeze(-1)
+    boxes = jax.numpy.concat(boxes, axis=0)
+
+    pred_classes = jax.numpy.concat(pred_classes, axis=0)
+    pred_confidence = jax.numpy.concat(pred_confidence, axis=0)
+    pred_num_detections = jax.numpy.concat(pred_num_detections, axis=0)
+    pred_boxes = jax.numpy.concat(pred_boxes, axis=0)
+
+    boxes_np = bounding_box.convert_format(boxes, source="xyxy", target="yxyx").numpy()
+    pred_boxes = bounding_box.convert_format(
+        pred_boxes, source="xyxy", target="yxyx"
+    ).numpy()
+
+    source_ids = np.char.mod(
+        "%d", np.linspace(1, len(pred_confidence), len(pred_confidence))
+    )
+    valid_gts = (boxes_np.sum(-1) > 0).sum(-1)
+    ground_truth = {
+        "source_id": [source_ids],
+        "height": [np.tile(np.array([640]), len(valid_gts))],
+        "width": [np.tile(np.array([640]), len(valid_gts))],
+        "num_detections": [valid_gts],
+        "boxes": [boxes_np],
+        "classes": [np.array(classes)],
+    }
+
+    predictions = {
+        "source_id": [source_ids],
+        "detection_boxes": [np.array(pred_boxes)],
+        "detection_classes": [np.array(pred_classes)],
+        "detection_scores": [np.array(pred_confidence)],
+        "num_detections": [np.array(pred_num_detections)],
+    }
+    metrics = compute_pycoco_metrics(ground_truth, predictions)
+    return metrics
+
+
 @nnx.jit
 def train_step(
     model: Yolo,
@@ -129,7 +170,7 @@ def main(
     epochs: int = 100,
     tpu: bool = False,
 ):
-
+    nms_fn = partial(tf.image.combined_non_max_suppression, clip_boxes=False)
     train_tfrecs = list(map(str, train_data_dir.glob("*.tfrecord")))
     train_dataset = get_dataset(train_tfrecs, batch_size, training=True)
 
@@ -198,6 +239,8 @@ def main(
 
         val_pclasses = []
         val_pboxes = []
+        val_pscores = []
+        val_pnd = []
         val_yclasses = []
         val_yboxes = []
         for val_xtf, val_ytf in val_dataset:
@@ -210,8 +253,19 @@ def main(
             val_predictions = validation_step(
                 model, metrics, scalers, anchors, anchors_norm, (val_x, val_y)
             )
-            val_pclasses.append(val_predictions["classes"])
-            val_pboxes.append(val_predictions["boxes"])
+            val_nmsed = jax2tf.call_tf(nms_fn)(
+                val_predictions["boxes"][:, :, None, :],
+                jax.nn.sigmoid(val_predictions["classes"]),
+                nms_max_detections,
+                nms_max_detections,
+                nms_iou,
+                nms_conf,
+            )
+            val_pclasses.append(val_nmsed.nmsed_classes)
+            val_pboxes.append(val_nmsed.nmsed_boxes)
+            val_pscores.append(val_nmsed.nmsed_scores)
+            val_pnd.append(val_nmsed.valid_detections)
+
             val_yclasses.append(val_y["classes"])
             val_yboxes.append(val_y["bboxes"])
 
@@ -221,14 +275,8 @@ def main(
         print()
         metrics.reset()
 
-        _ = evaluate_coco_metrics(
-            val_yclasses,
-            val_yboxes,
-            val_pclasses,
-            val_pboxes,
-            nms_conf,
-            nms_iou,
-            nms_max_detections,
+        _ = evaluate_coco_metrics_no_nms(
+            val_yclasses, val_yboxes, val_pclasses, val_pboxes, val_pscores, val_pnd
         )
 
 
