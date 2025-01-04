@@ -254,8 +254,8 @@ def main(
                 model, metrics, scalers, anchors, anchors_norm, (val_x, val_y)
             )
             val_nmsed = jax2tf.call_tf(nms_fn)(
-                val_predictions["boxes"][:, :, None, :],
-                jax.nn.sigmoid(val_predictions["classes"]),
+                val_predictions["boxes"][:, :, None, :].astype("float32"),
+                jax.nn.sigmoid(val_predictions["classes"]).astype("float32"),
                 nms_max_detections,
                 nms_max_detections,
                 nms_iou,
